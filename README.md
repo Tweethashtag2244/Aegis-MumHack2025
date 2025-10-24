@@ -14,7 +14,7 @@ Built as a **multi-agent system**, Aegis evaluates videos through specialized AI
 
 ---
 
-## 🧩 Core Agents
+## 🧠 Core Agents
 
 ### 1. Perceptual Forensics Agent
 - Extracts frames and analyzes **spectral slope (1/f)**, **noise residual variance**, and **CNN-based artifact detection**.  
@@ -45,6 +45,16 @@ Built as a **multi-agent system**, Aegis evaluates videos through specialized AI
 ### 6. Collective Consensus Agent
 - Aggregates verification signals from web sources, reverse search, and trusted databases.  
 - Computes `consensusScore` and supporting evidence.
+
+---
+
+## 🧩 Tech Stack
+
+- **Languages:** Python, TypeScript  
+- **Frameworks:** Flask, TensorFlow, OpenCV, Firebase Functions, Vertex AI GenKit  
+- **Infrastructure:** Docker, Nginx (TLS 1.2), Cloud Run, GCS/S3  
+- **Monitoring & CI/CD:** Prometheus, Grafana, Sentry, GitHub Actions  
+- **Models:** Gemini 2.5 Flash (Vision + ASR), Custom CNN (artifact detection)  
 
 ---
 
