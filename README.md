@@ -98,7 +98,7 @@ The training and evaluation datasets include:
 - Synthetic samples generated using **Sora**, **Runway**, and **Pika**  
 - Adversarially perturbed variants for stress testing  
 
-**Dataset Link:** [Access Dataset Here](https://example.com/dataset-placeholder)
+**Dataset Link:** [Access Dataset Here](https://www.kaggle.com/datasets/kanzeus/realai-video-dataset)
 
 ---
 
