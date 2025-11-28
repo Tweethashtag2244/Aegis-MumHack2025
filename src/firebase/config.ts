@@ -2,11 +2,11 @@
 // This file is not typed because it is auto-generated
 import { initializeApp } from 'firebase/app';
 const firebaseApp = initializeApp({
-  "apiKey": "AIzaSyAWixdtNH6jegJKt1SX-oVrskwQKOJiMvA",
-  "authDomain": "studio-2261600734-578e8.firebaseapp.com",
-  "projectId": "studio-2261600734-578e8",
-  "storageBucket": "studio-2261600734-578e8.appspot.com",
-  "messagingSenderId": "760502677359",
-  "appId": "1:760502677359:web:4d9c1515f024f82701029a"
+  "apiKey": process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  "authDomain": process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  "projectId": process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  "storageBucket": process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  "messagingSenderId": process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  "appId": process.env.NEXT_PUBLIC_FIREBASE_APP_ID
 });
 export const firebaseConfig = firebaseApp.options;
