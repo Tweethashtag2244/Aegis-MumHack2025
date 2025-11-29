@@ -1,5 +1,5 @@
 # =========================================
-# AEGIS Perceptual Forensics (Adversarial Defense)
+# AEGIS Perceptual Forensics (Enhanced Attribution with Sora 2)
 # =========================================
 
 import os
@@ -15,6 +15,7 @@ import tempfile
 # Optional TensorFlow import
 try:
     import tensorflow as tf
+    from tensorflow.keras import layers, models
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
@@ -37,10 +38,12 @@ def compute_spectral_slope(frame):
     ps = np.abs(fshift)**2
 
     center = s // 2
+    # Optimized radial profile calculation
     y, x = np.ogrid[:s, :s]
     r_grid = np.sqrt((y - center)**2 + (x - center)**2)
     r_int = r_grid.astype(int)
     
+    # Vectorized radial mean using bincount
     radial = np.bincount(r_int.ravel(), weights=ps.ravel()) / np.maximum(np.bincount(r_int.ravel()), 1)
     radial = radial[1:center] 
 
@@ -55,42 +58,21 @@ def compute_noise_residual(frame):
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     return float(np.var(gray - blurred))
 
-# --- NEW: Double Compression Detection ---
+# --- Double Compression Detection ---
 def detect_double_compression(frame):
-    """
-    Analyzes DCT histogram to find double compression artifacts.
-    Real social media videos are single-compressed (by the platform).
-    Resized/Edited AI videos are double-compressed.
-    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
     
-    # Crop to 8x8 aligned grid
-    h_trim = h - (h % 8)
-    w_trim = w - (w % 8)
-    gray = gray[:h_trim, :w_trim]
-    
-    # Compute block-wise DCT
-    # (Simplified approximation using difference error for speed)
-    # A re-compressed image often has a periodic error pattern in the pixel difference
-    
-    # Calculate simple error metric:
-    # Double compressed images often have lower error variance in 8x8 blocks due to quantization snapping
-    
-    # We will use a heuristic: High quality AI resized -> Low frequency artifacts
-    # Real WhatsApp -> High frequency block noise
-    
-    # Edge density check (Real WhatsApp has jagged block edges)
+    # Simple edge density check as proxy for blockiness
     edges = cv2.Canny(gray, 100, 200)
     edge_density = np.sum(edges) / (h * w)
-    
     return edge_density
 
 # -----------------------------------------
 # 2. Agents
 # -----------------------------------------
 
-# --- AGENT: Provenance & Lineage (UPDATED) ---
+# --- AGENT: Provenance & Lineage ---
 def check_provenance(video_path, filename):
     try:
         cmd = [
@@ -103,7 +85,7 @@ def check_provenance(video_path, filename):
         format_tags = data.get('format', {}).get('tags', {})
         encoder = format_tags.get('encoder', '').lower()
         
-        # Get Video Dimensions
+        # Get Dimensions
         width = 0
         height = 0
         streams = data.get('streams', [])
@@ -122,13 +104,13 @@ def check_provenance(video_path, filename):
                     bool(re.search(r'facebook|fb_img', filename.lower())) or \
                     bool(re.search(r'tiktok', filename.lower()))
 
-        # --- DECOY DETECTION 1: Resolution Mismatch ---
+        # Decoy Detection (Resolution check for social media)
         is_decoy = False
         if is_social:
             standard_dims = [1920, 1080, 1280, 720, 848, 480, 640, 360, 352]
             if width not in standard_dims and height not in standard_dims:
                 is_decoy = True
-                print(f"[Provenance] Decoy Detected! Filename is social but dimensions {width}x{height} are non-standard.")
+                print(f"[Provenance] Decoy Detected! Social filename but odd dimensions {width}x{height}.")
 
         # 2. Check Suspicious Encoders
         suspicious_encoders = ['lavf', 'unknown', 'isom', 'google', 'gen-2', 'gen-3', 'luma'] 
@@ -138,7 +120,6 @@ def check_provenance(video_path, filename):
             is_suspicious_encoder = True
             encoder = "Missing/Stripped"
 
-        # Score Logic
         if is_decoy:
             score = 0.1 
             is_mobile = False
@@ -162,24 +143,53 @@ def check_provenance(video_path, filename):
         print(f"Provenance Error: {e}")
         return {"provenanceScore": 0.5, "encoder": "Error", "isMobileFilename": False, "isSocialFilename": False, "hasC2PA": False}
 
-# --- AGENT: Model Attribution ---
+# --- AGENT: Model Attribution (ENHANCED) ---
 def attribute_model(width, height, fps, encoder, is_mobile, is_social):
+    # Trust trusted patterns
     if is_mobile or is_social:
          return {"detectedModel": "None (Trusted Pattern)", "confidence": 0.0}
 
+    # 1. Google Check
     if 'google' in encoder:
         return {"detectedModel": "Google Veo / Imagen", "confidence": 0.95}
-        
+    
+    # 2. Resolution-Based Heuristics (Enhanced with Sora 2 specs)
+    # Using 'lavf' as a general indicator for Sora based on common observation, 
+    # but specific encoder strings might evolve.
     heuristics = [
-        {"name": "Sora (Likely)", "w": 1920, "h": 1080, "fps": 30, "enc": "lavf"},
-        {"name": "Runway Gen-2", "w": 1792, "h": 1024, "fps": 24, "enc": "mp4"},
-        {"name": "Pika Labs", "w": 1280, "h": 720, "fps": 24, "enc": "lavf"},
+        # Sora 1 (Legacy)
+        {"name": "Sora (Legacy)", "w": 1920, "h": 1080, "enc": "lavf"},
+        
+        # Sora 2 (Standard) - 1280x720 (Landscape/Portrait)
+        {"name": "Sora 2 (Standard)", "w": 1280, "h": 720, "enc": "lavf"},
+        
+        # Sora 2 Pro - 1280x720 (Same as standard, indistinguishable by res alone)
+        {"name": "Sora 2 Pro", "w": 1280, "h": 720, "enc": "lavf"},
+        
+        # Sora 2 Pro - High Res 1792x1024
+        {"name": "Sora 2 Pro (High Res)", "w": 1792, "h": 1024, "enc": "lavf"},
+
+        # Other Models
+        {"name": "Runway Gen-2", "w": 1792, "h": 1024, "enc": "mp4"},
+        {"name": "Pika Labs", "w": 1280, "h": 720, "enc": "lavf"},
+        {"name": "Luma Dream Machine", "w": 1360, "h": 752, "enc": "lavf"}, 
     ]
     
     for h in heuristics:
-        if width == h["w"] and height == h["h"]:
+        # Check both Landscape (w x h) and Portrait (h x w)
+        match_landscape = (width == h["w"] and height == h["h"])
+        match_portrait = (width == h["h"] and height == h["w"])
+        
+        if match_landscape or match_portrait:
              if h["enc"] in encoder:
-                 return {"detectedModel": h["name"], "confidence": 0.8}
+                 return {"detectedModel": h["name"], "confidence": 0.85}
+             elif encoder == "unknown" or encoder == "":
+                 return {"detectedModel": h["name"] + "?", "confidence": 0.5}
+
+    # 3. Generic Fallback (The Catch-All)
+    # If we have a suspicious encoder ('lavf') but weird resolution, it's still likely AI or a rip.
+    if 'lavf' in encoder:
+        return {"detectedModel": "Generic AI (FFmpeg Signature)", "confidence": 0.6}
              
     return {"detectedModel": "Unknown / Custom", "confidence": 0.1}
 
