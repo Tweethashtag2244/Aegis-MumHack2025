@@ -29,14 +29,13 @@ You are an AI expert analyzing the semantic coherence between a video's visual c
 
 ### Instructions:
 1.  **Assess Overall Coherence:** Evaluate if the sounds (both speech and environmental) logically match the visual events.
-2.  **Assess Audio-Visual Sync:** Pay close attention to lip-sync for speech and the timing of environmental sounds with visual cues.
-3.  **Generate Score:** Based on your assessment, provide a 'semanticScore' from 0.0 to 1.0.
-4.  **Generate Explanation:** Write a brief explanation for your score, referencing specific visual and audio cues.
-
-### Scoring Rubric:
-- **0.8 - 1.0 (High Coherence):** Excellent sync, speech is relevant to the visuals, and ambient sounds are perfectly appropriate for the environment.
-- **0.5 - 0.7 (Moderate Coherence):** Minor issues. Sync might be slightly off, or some background sounds may seem out of place, but it's not overtly contradictory.
-- **0.0 - 0.4 (Low Coherence):** Clear contradictions. Speech does not match the scene, lip-sync is obviously wrong, or environmental sounds are illogical (e.g., city traffic in a forest). Never output 0 unless there is a blatant and undeniable contradiction.
+2.  **Handle Real-World Noise:** **Crucially, distinguish between "contradiction" and "background noise."**
+    - *Real videos* often have unrelated background audio (TV playing, people talking off-camera, wind, traffic). This is NORMAL. Do NOT penalize this unless it defies physics (e.g., a person on screen moving lips but no sound comes out).
+    - *AI videos* often have "hallucinated" sounds or eerie silence.
+3.  **Generate Score (0.0 - 1.0):**
+    - **0.8 - 1.0:** Clear match or plausible background noise.
+    - **0.5 - 0.7:** Audio is messy or unrelated (e.g., music overlay), but not physically impossible.
+    - **0.0 - 0.4:** Direct Physical Contradiction (e.g., dog barking but visual is a cat, lip-sync completely broken).
 
 ### Required Output Format (JSON):
 {

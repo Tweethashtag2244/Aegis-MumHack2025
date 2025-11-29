@@ -1,16 +1,18 @@
 # =========================================
-# AEGIS Perceptual Forensics (Local Flask Version)
+# AEGIS Perceptual Forensics (Full Multi-Agent Version)
 # =========================================
 
 import os
 import cv2
 import numpy as np
+import subprocess
+import json
+import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tempfile
-import json
 
-# Optional TensorFlow import for trained model support
+# Optional TensorFlow import
 try:
     import tensorflow as tf
     from tensorflow.keras import layers, models
@@ -19,14 +21,11 @@ except ImportError:
     TENSORFLOW_AVAILABLE = False
     print("Warning: TensorFlow not available. Will use heuristic method only.")
 
-# -----------------------------------------
-# 1. Initialize Flask app
-# -----------------------------------------
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # -----------------------------------------
-# 2. Helper Functions
+# 1. Helper Functions (Perceptual Agent)
 # -----------------------------------------
 def compute_spectral_slope(frame):
     """Compute 1/f spectral slope for a single frame."""
@@ -40,118 +39,179 @@ def compute_spectral_slope(frame):
     ps = np.abs(fshift)**2
 
     center = s // 2
-    radial = []
+    # Optimized radial profile calculation
     y, x = np.ogrid[:s, :s]
-    for r in range(1, center):
-        mask = ((y-center)**2 + (x-center)**2 >= (r-0.5)**2) & ((y-center)**2 + (x-center)**2 < (r+0.5)**2)
-        vals = ps[mask]
-        if vals.size:
-            radial.append(np.mean(vals))
-    radial = np.array(radial)
-    if radial.size < 3:
-        return 0.0
+    r_grid = np.sqrt((y - center)**2 + (x - center)**2)
+    r_int = r_grid.astype(int)
+    
+    # Vectorized radial mean using bincount
+    radial = np.bincount(r_int.ravel(), weights=ps.ravel()) / np.maximum(np.bincount(r_int.ravel()), 1)
+    radial = radial[1:center] # Skip DC and edges
+
+    if radial.size < 3: return 0.0
 
     freqs = np.arange(1, radial.size + 1)
-    logf = np.log(freqs)
-    logp = np.log(radial + 1e-12)
-    slope, _ = np.polyfit(logf, logp, 1)
+    slope, _ = np.polyfit(np.log(freqs), np.log(radial + 1e-12), 1)
     return float(slope)
 
-
 def compute_noise_residual(frame):
-    """Estimate the noise residual variance of a frame."""
+    """Estimate the noise residual variance."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-    residual = gray - blurred
-    return float(np.var(residual))
-
+    return float(np.var(gray - blurred))
 
 # -----------------------------------------
-# 2.1. Model Loading (for trained CNN)
+# 2. New Agents: Provenance, Attribution, Adversarial
+# -----------------------------------------
+
+# --- AGENT: Provenance & Lineage ---
+def check_provenance(video_path, filename):
+    """Extracts metadata to find editing signatures or generative tags."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", video_path
+        ]
+        # Use subprocess to call ffprobe
+        result = subprocess.check_output(cmd)
+        data = json.loads(result)
+        
+        format_tags = data.get('format', {}).get('tags', {})
+        encoder = format_tags.get('encoder', '').lower()
+        creation_time = format_tags.get('creation_time', None)
+        
+        # 1. Check Filename Patterns (New)
+        # Real phones use patterns like "VID_2025..." or "IMG_..." or "20250903..."
+        is_mobile_filename = bool(re.search(r'(vid|img|pxl|dji)_\d{8}', filename.lower())) or \
+                             bool(re.search(r'\d{8}_\d{6}', filename))
+
+        # 2. Check Suspicious Encoders
+        # 'ffmpeg' is common in edits, so it is less suspicious than 'lavf' or 'unknown'
+        suspicious_encoders = ['lavf', 'unknown', 'isom'] 
+        is_suspicious_encoder = any(x in encoder for x in suspicious_encoders)
+        
+        # If metadata is completely empty, that is also suspicious
+        if not format_tags:
+            is_suspicious_encoder = True
+            encoder = "Missing/Stripped"
+
+        # Score Logic
+        if is_mobile_filename:
+            score = 0.95 # Highly likely real if filename matches camera pattern
+        elif is_suspicious_encoder:
+            score = 0.3 
+        else:
+            score = 0.8
+        
+        return {
+            "provenanceScore": score,
+            "encoder": encoder,
+            "creationTime": creation_time,
+            "isMobileFilename": is_mobile_filename,
+            "hasC2PA": False # Placeholder: Real C2PA requires a dedicated library
+        }
+    except Exception as e:
+        print(f"Provenance Error: {e}")
+        return {"provenanceScore": 0.5, "encoder": "Error", "isMobileFilename": False, "hasC2PA": False}
+
+# --- AGENT: Model Attribution ---
+def attribute_model(width, height, fps, encoder, is_mobile_filename):
+    """Guesses the AI generator based on resolution and encoding fingerprints."""
+    
+    # If it looks like a phone file, DO NOT guess it's a model
+    if is_mobile_filename:
+         return {"detectedModel": "None (Mobile Pattern)", "confidence": 0.0}
+
+    # Common fingerprints for current gen AI video tools
+    heuristics = [
+        {"name": "Sora (Likely)", "w": 1920, "h": 1080, "fps": 30, "enc": "lavf"},
+        {"name": "Runway Gen-2", "w": 1792, "h": 1024, "fps": 24, "enc": "mp4"},
+        {"name": "Pika Labs", "w": 1280, "h": 720, "fps": 24, "enc": "lavf"},
+    ]
+    
+    for h in heuristics:
+        # Simple fuzzy match on resolution
+        if width == h["w"] and height == h["h"]:
+             # Stricter check: Encoder must also match partially if defined in heuristic
+             if h["enc"] in encoder:
+                 return {"detectedModel": h["name"], "confidence": 0.8}
+             elif encoder == "unknown" or encoder == "":
+                 # If encoder is hidden, it's a weak "Maybe"
+                 return {"detectedModel": h["name"] + "?", "confidence": 0.4}
+             
+    return {"detectedModel": "Unknown / Custom", "confidence": 0.1}
+
+# --- AGENT: Adversarial Simulation ---
+def perform_adversarial_attack(frame, model, original_prob, use_cnn):
+    """Applies noise/blur to see if the detection is fragile."""
+    try:
+        # Attack 1: Gaussian Noise (Simulates compression grain)
+        noise = np.random.normal(0, 15, frame.shape).astype(np.uint8)
+        noisy_frame = cv2.add(frame, noise)
+        
+        # Attack 2: Downscale-Upscale (Simulates social media compression)
+        h, w = frame.shape[:2]
+        small = cv2.resize(frame, (w//2, h//2))
+        restored = cv2.resize(small, (w, h))
+        
+        if use_cnn and model:
+            prob_noise = detect_fake_probability_cnn(noisy_frame, model)
+            prob_blur = detect_fake_probability_cnn(restored, model)
+        else:
+            # Heuristic fallback for adversarial check
+            # Real cameras maintain slope relationships; AI often breaks under noise
+            s_noise = compute_spectral_slope(noisy_frame)
+            r_noise = compute_noise_residual(noisy_frame)
+            prob_noise = detect_fake_probability_heuristic(s_noise, r_noise)
+            prob_blur = original_prob # Heuristics are less sensitive to blur
+
+        # Logic: If adding simple noise changes the probability by > 30%, the model is "fragile"
+        variance = max(abs(prob_noise - original_prob), abs(prob_blur - original_prob))
+        
+        # Robustness Score: 1.0 (Very Robust) -> 0.0 (Very Fragile)
+        robustness = max(0.0, 1.0 - (variance * 2.0)) 
+        
+        return robustness
+    except Exception as e:
+        print(f"Adversarial Error: {e}")
+        return 0.5
+
+# -----------------------------------------
+# 3. Model Loading & Core Detection
 # -----------------------------------------
 def load_trained_model(model_path='models/artifact_detector.h5'):
-    """
-    Load a trained CNN model if available.
-    """
-    if not TENSORFLOW_AVAILABLE:
-        return None
-    
-    if not os.path.exists(model_path):
-        return None
-    
+    if not TENSORFLOW_AVAILABLE: return None
+    if not os.path.exists(model_path): return None
     try:
         model = tf.keras.models.load_model(model_path)
         print(f"✓ Loaded trained model from: {model_path}")
         return model
     except Exception as e:
-        print(f"Warning: Could not load model from {model_path}: {e}")
+        print(f"Warning: Could not load model: {e}")
         return None
 
-
 def detect_fake_probability_cnn(frame, model):
-    """
-    Use trained CNN model (MobileNetV2) to infer fake probability.
-    
-    Args:
-        frame: Video frame (BGR format from OpenCV)
-        model: Trained TensorFlow model
-    
-    Returns:
-        Probability (0-1) that the frame is AI-generated
-    """
     try:
-        # 1. Resize to 224x224 (Standard for MobileNetV2)
         resized = cv2.resize(frame, (224, 224))
-        
-        # 2. Convert to RGB (OpenCV uses BGR by default)
         rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        
-        # 3. Preprocess for MobileNetV2 (Scale to [-1, 1])
-        # Data was trained with (frame / 127.5) - 1.0
-        normalized = rgb_frame.astype('float32')
-        normalized = (normalized / 127.5) - 1.0
-        
-        # 4. Add batch dimension (1, 224, 224, 3)
+        normalized = (rgb_frame.astype('float32') / 127.5) - 1.0
         input_data = np.expand_dims(normalized, axis=0)
-        
-        # 5. Predict
         prediction = model.predict(input_data, verbose=0)
         return float(prediction[0][0])
-        
-    except Exception as e:
-        print(f"[ERROR] CNN Prediction failed: {e}")
-        return 0.5 # Fallback to uncertain
+    except:
+        return 0.5
 
-
-# -----------------------------------------
-# 2.2. Heuristic Detection (fallback)
-# -----------------------------------------
 def detect_fake_probability_heuristic(slope, residual, baseline_slope=-3.0):
-    """
-    Heuristic-based fake probability estimation using spectral and noise features.
-    """
-    # Normalize spectral slope deviation
     slope_deviation = abs(slope - baseline_slope)
     slope_ai_prob = min(1.0, max(0.0, (slope_deviation - 0.2) / 0.6))
     
-    # Normalize noise residual
-    if residual < 3000:
-        noise_ai_prob = 0.8  # Very low noise suggests AI
-    elif residual < 5000:
-        noise_ai_prob = 0.5  # Low noise, uncertain
-    elif residual < 10000:
-        noise_ai_prob = 0.2  # Moderate noise, likely real
-    else:
-        noise_ai_prob = 0.1  # High noise, very likely real
+    if residual < 3000: noise_ai_prob = 0.8
+    elif residual < 5000: noise_ai_prob = 0.5
+    elif residual < 10000: noise_ai_prob = 0.2
+    else: noise_ai_prob = 0.1
     
-    # Combined probability
-    combined_prob = 0.6 * slope_ai_prob + 0.4 * noise_ai_prob
-    
-    # Sigmoid smoothing
-    final_prob = 1.0 / (1.0 + np.exp(-5.0 * (combined_prob - 0.5)))
-    
-    return float(final_prob)
-
+    combined = 0.6 * slope_ai_prob + 0.4 * noise_ai_prob
+    return 1.0 / (1.0 + np.exp(-5.0 * (combined - 0.5)))
 
 def save_anomaly_frame(frame, frame_id, outdir="frames"):
     os.makedirs(outdir, exist_ok=True)
@@ -159,152 +219,124 @@ def save_anomaly_frame(frame, frame_id, outdir="frames"):
     cv2.imwrite(fname, frame)
     return fname
 
-
 # -----------------------------------------
-# 3. Main analysis logic
+# 4. Main Execution Logic
 # -----------------------------------------
-# Global variable to cache loaded model
 _loaded_model = None
 _model_path = 'models/artifact_detector.h5'
 
 def get_detection_model():
-    """Get the detection model (trained CNN or None for heuristic)."""
     global _loaded_model
     if _loaded_model is None:
         _loaded_model = load_trained_model(_model_path)
     return _loaded_model
 
-
-def run_perceptual_forensics(video_path, model_path='models/artifact_detector.h5'):
-    """
-    Run perceptual forensics analysis on a video.
-    """
+def run_full_scan(video_path, filename="unknown_file", model_path='models/artifact_detector.h5'):
     global _model_path
     _model_path = model_path
     
-    BASELINE_SLOPE = -3.0
-    AI_SLOPE_THRESHOLD = -3.4
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {"error": "Could not open video file"}
+
+    # --- 1. Run Provenance Agent (Metadata) ---
+    provenance = check_provenance(video_path, filename)
     
-    # Try to load trained model
+    # --- 2. Run Model Attribution Agent (Fingerprints) ---
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    attribution = attribute_model(width, height, fps, provenance['encoder'], provenance['isMobileFilename'])
+    
+    # --- 3. Run Perceptual & Adversarial Agents ---
     cnn_model = get_detection_model()
     use_cnn = cnn_model is not None
-    detection_method = "trained CNN" if use_cnn else "heuristic analysis"
-
-    cap = cv2.VideoCapture(video_path)
+    
     frame_count = 0
     sample_every_n = 5
-
+    
     spectral_slopes = []
     noise_residuals = []
     fake_probs = []
+    robustness_scores = []
     anomaly_frames = []
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            break
+        if not ret: break
         frame_count += 1
-        if frame_count % sample_every_n != 0:
-            continue
+        if frame_count % sample_every_n != 0: continue
 
+        # Perceptual Checks
         slope = compute_spectral_slope(frame)
         residual = compute_noise_residual(frame)
         
-        # Use trained CNN if available, otherwise use heuristic
         if use_cnn:
-            # avg_prob is the probability of being AI-generated (0=Real, 1=Fake)
             prob = detect_fake_probability_cnn(frame, cnn_model)
         else:
-            prob = detect_fake_probability_heuristic(slope, residual, BASELINE_SLOPE)
+            prob = detect_fake_probability_heuristic(slope, residual)
 
         spectral_slopes.append(slope)
         noise_residuals.append(residual)
         fake_probs.append(prob)
 
-        if slope < AI_SLOPE_THRESHOLD or residual < 1000:
+        # Adversarial Checks (Run less frequently for performance)
+        if len(fake_probs) % 5 == 0:
+            rob = perform_adversarial_attack(frame, cnn_model, prob, use_cnn)
+            robustness_scores.append(rob)
+
+        # Save Anomalies
+        if prob > 0.85: # High confidence fake frames
             anomaly_frames.append(save_anomaly_frame(frame, frame_count))
 
     cap.release()
 
-    if not spectral_slopes:
+    if not fake_probs:
         return {"error": "Could not analyze video frames"}
 
-    avg_slope = float(np.mean(spectral_slopes))
-    slope_dev = abs(avg_slope - BASELINE_SLOPE)
-    avg_residual = float(np.mean(noise_residuals))
     avg_prob = float(np.mean(fake_probs))
-    avg_fft_dev = float(np.mean([abs(s - BASELINE_SLOPE) * 1000 for s in spectral_slopes]))
+    avg_robustness = float(np.mean(robustness_scores)) if robustness_scores else 0.5
+    avg_slope = float(np.mean(spectral_slopes))
+    avg_residual = float(np.mean(noise_residuals))
 
-    # --- WEIGHTING LOGIC ---
-    if use_cnn:
-        # If we have a trained MobileNetV2 model, TRUST IT heavily.
-        cnn_weight = 0.90
-        spectral_weight = 0.05
-        noise_weight = 0.05
-    else:
-        # Fallback to heuristics if model is missing
-        cnn_weight = 0.0
-        spectral_weight = 0.70
-        noise_weight = 0.30
-
-    # Normalize terms to 0-1 range for scoring
-    slope_term = min(slope_dev / 0.5, 1.0) # deviation of 0.5 or more is bad
-    noise_term = max(0.0, min((10000 - avg_residual) / 10000, 1.0)) # residual < 10000 is suspicious
-    
-    # --- CRITICAL FIX: TARGETED INVERSION ---
-    # cnn_penalty_term represents the total "Badness" contributed by the model.
-    cnn_penalty_term = avg_prob 
-    
-    if use_cnn:
-        # Sum of heuristic penalties (0=Good, 1=Bad)
-        heuristic_penalty = (slope_term * 0.7 + noise_term * 0.3)
-        
-        # Check for Inversion Condition: High CNN output, but Good Heuristics.
-        # This condition suggests the video is REAL, but the model labels are swapped.
-        if heuristic_penalty < 0.2 and avg_prob > 0.6:
-            # If the model strongly predicts FAKE (avg_prob > 0.6) but physics says REAL (< 0.2 penalty), 
-            # we flip the model's contribution to get a high score for Real videos.
-            cnn_penalty_term = 1.0 - avg_prob 
-            print(f"[DEBUG] Heuristic Inversion Triggered: Real video assumption (Heuristics Good, CNN Fake) - Penalty {avg_prob:.2f} -> {cnn_penalty_term:.2f}")
-
-    # Calculate final deduction
-    # If terms are high (AI-like), score drops.
-    penalty = (spectral_weight * slope_term) + (noise_weight * noise_term) + (cnn_weight * cnn_penalty_term)
-    
-    # Calculate score based on penalty (1.0 - penalty)
-    perceptual_score = 1.0 - penalty
-    perceptual_score = round(max(0.0, min(perceptual_score, 1.0)), 4)
-
-    # Determine which method was used
-    method_name = "trained CNN model" if use_cnn else "heuristic analysis"
-    
+    # Construct explanation
+    method_name = "trained CNN" if use_cnn else "heuristics"
     explanation = (
-        f"The video's spectral slope is {avg_slope:.2f}, compared to the baseline mean of {BASELINE_SLOPE:.2f}. "
-        f"Slope deviation = {slope_dev:.2f}. Noise variance = {avg_residual:.2f}. "
-        f"AI artifact probability ({method_name}): {avg_prob:.2f}."
+        f"Analyzed {frame_count} frames. Avg AI Probability ({method_name}): {avg_prob:.2f}. "
+        f"Adversarial Robustness: {avg_robustness:.2f}. "
+        f"Provenance: {provenance['encoder']}."
     )
+
+    # Final Perceptual Score (1.0 = Real, 0.0 = Fake)
+    perceptual_score = 1.0 - avg_prob
+    perceptual_score = round(max(0.0, min(perceptual_score, 1.0)), 4)
 
     result = {
         "perceptualScore": perceptual_score,
         "explanation": explanation,
         "forensicIndicators": {
-            "avgFFTDeviation": avg_fft_dev,
             "avgNoiseResidual": avg_residual,
             "modelConfidence": avg_prob,
             "spectralSlope": avg_slope
         },
-        "anomalyFrames": anomaly_frames
+        "anomalyFrames": anomaly_frames[:5], # Limit return size
+        # New Agent Outputs
+        "provenance": provenance,
+        "attribution": attribution,
+        "adversarial": {
+            "robustnessScore": avg_robustness,
+            "explanation": "High robustness indicates consistent artifacts." if avg_robustness > 0.7 else "Low robustness suggests fragile generation artifacts."
+        }
     }
 
     return result
 
-
 # -----------------------------------------
-# 4. Flask Endpoints
+# 5. Flask Endpoints
 # -----------------------------------------
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "service": "perceptual-forensics-agent"}), 200
+    return jsonify({"status": "ok"}), 200
 
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_video():
@@ -319,12 +351,15 @@ def analyze_video():
         return jsonify({"error": "No video file provided"}), 400
 
     video_file = request.files['video']
+    original_filename = video_file.filename # Capture the real filename!
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
         video_file.save(tmp.name)
         video_path = tmp.name
 
     try:
-        result = run_perceptual_forensics(video_path)
+        # PASS THE FILENAME HERE
+        result = run_full_scan(video_path, original_filename)
         response = jsonify(result)
         response.headers.add('Access-Control-Allow-Origin', '*')
         return response
@@ -332,16 +367,10 @@ def analyze_video():
         print("Error:", e)
         import traceback
         traceback.print_exc()
-        response = jsonify({"error": str(e)})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        return response, 500
+        return jsonify({"error": str(e)}), 500
     finally:
         if os.path.exists(video_path):
             os.remove(video_path)
 
-
-# -----------------------------------------
-# 5. Run Server
-# -----------------------------------------
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5001, debug=True)

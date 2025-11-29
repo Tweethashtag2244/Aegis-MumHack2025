@@ -1,14 +1,15 @@
-
 'use server';
 
 import { ai } from '@/ai/genkit';
 import { analyzeSemanticCoherence } from './analyze-semantic-coherence';
 import { generateReasoningExplanation } from './generate-reasoning-explanation';
+import { runCollectiveConsensus } from './collective-consensus';
 import {
   FullAnalysisInputSchema,
   type FullAnalysisInput,
   type FullAnalysisOutput,
   FullAnalysisOutputSchema,
+  type ComputerVisionOutput
 } from '@/ai/types';
 
 export async function runFullAnalysis(
@@ -24,39 +25,78 @@ const runFullAnalysisFlow = ai.defineFlow(
     outputSchema: FullAnalysisOutputSchema,
   },
   async (input) => {
-    // --- Step 0: Configurable weights ---
-    // Balances the sophisticated perceptual analysis from the Python script
-    // with the semantic analysis from the Genkit flow.
-    const WEIGHT_PERCEPTUAL = 0.85;
-    const WEIGHT_SEMANTIC = 0.15;
-
-    // --- Step 1: Perceptual analysis is passed in from the client ---
-    // This result comes directly from the local Python/Flask server.
+    // 1. Parse Python Results
+    const cvResult = input.perceptualAnalysis as ComputerVisionOutput;
+    
     const {
       perceptualScore,
       explanation: perceptualExplanation,
       forensicIndicators,
       anomalyFrames,
-    } = input.perceptualAnalysis;
+      provenance,
+      attribution,
+      adversarial
+    } = cvResult;
 
-    // --- Step 2: Run semantic coherence analysis ---
+    // 2. Run Semantic Analysis
     const { semanticScore, explanation: semanticExplanation } =
       await analyzeSemanticCoherence({
         videoDataUri: input.videoDataUri,
       });
 
-    // --- Step 3: Compute final authenticity score ---
-    const authenticityScore =
-      WEIGHT_PERCEPTUAL * perceptualScore +
-      WEIGHT_SEMANTIC * semanticScore;
+    // 3. Run Collective Consensus
+    const { consensusScore, explanation: consensusExplanation } = 
+      await runCollectiveConsensus(semanticExplanation);
 
-    // --- Step 4: Classify based on authenticity likelihood ---
+    // 4. Weighted Fusion Logic
+    const W_PERCEPTUAL = 0.40;
+    const W_SEMANTIC = 0.20;
+    const W_PROVENANCE = 0.15;
+    const W_ROBUSTNESS = 0.15;
+    const W_CONSENSUS = 0.10;
+
+    let authenticityScore =
+      (perceptualScore * W_PERCEPTUAL) +
+      (semanticScore * W_SEMANTIC) +
+      (provenance.provenanceScore * W_PROVENANCE) +
+      (adversarial.robustnessScore * W_ROBUSTNESS) +
+      (consensusScore * W_CONSENSUS);
+
+    // --- OVERRIDE LOGIC START ---
+
+    // A. "The Sora Breaker" (Perceptual Veto)
+    // ONLY trigger if score is extremely low (< 0.20) AND we don't have mobile provenance.
+    // If it's a mobile file, low perceptual score usually just means "bad camera quality/low light".
+    // We check if encoder is unknown AND provenance score is high (indicative of mobile file logic in python)
+    const isMobile = provenance.encoder === "unknown" && provenance.provenanceScore > 0.9; 
+    
+    if (perceptualScore < 0.20 && !isMobile) {
+        authenticityScore = Math.min(authenticityScore, 0.40);
+        console.log("Veto Triggered: Low perceptual score on non-mobile video.");
+    }
+
+    // B. "The Real Video Saver"
+    // If provenance detects a mobile filename pattern or C2PA, trust it more.
+    if (provenance.hasC2PA || provenance.provenanceScore > 0.9) {
+        // Boost significantly, as filename patterns are hard to fake accidentally
+        authenticityScore = Math.max(authenticityScore, 0.75);
+    }
+
+    // C. Model Attribution Override (RELAXED)
+    // Only cap if confidence is VERY high (> 0.75) AND it's not a generic "Sora?" guess.
+    if (attribution.confidence > 0.75 && !attribution.detectedModel.includes("?")) {
+        authenticityScore = Math.min(authenticityScore, 0.3);
+    }
+    
+    // --- OVERRIDE LOGIC END ---
+
+    // 5. Classification
     let classification: FullAnalysisOutput['classification'];
-    if (authenticityScore >= 0.7) classification = 'Likely Real';
+    if (authenticityScore >= 0.70) classification = 'Likely Real';
     else if (authenticityScore < 0.5) classification = 'Likely AI-Generated';
     else classification = 'Uncertain / Mixed Evidence';
-
-    // --- Step 5: Generate reasoning explanation ---
+    
+    // 6. Reasoning
     const reasoningResult = await generateReasoningExplanation({
       perceptualScore,
       perceptualExplanation,
@@ -64,21 +104,28 @@ const runFullAnalysisFlow = ai.defineFlow(
       semanticExplanation,
       classification,
       finalScore: authenticityScore,
+      additionalContext: {
+        provenance,
+        attribution,
+        adversarial,
+        consensus: { score: consensusScore, explanation: consensusExplanation }
+      }
     });
 
-    // --- Step 6: Return final structured output ---
     return {
-      authenticityScore,
+      authenticityScore: Number(authenticityScore.toFixed(2)),
       classification,
       reasoningSummary: reasoningResult.reasoningSummary,
       perceptualScore,
-      perceptualExplanation,
       semanticScore,
+      provenanceScore: provenance.provenanceScore,
+      consensusScore,
+      perceptualExplanation,
       semanticExplanation,
       forensicIndicators,
       anomalyFrames,
+      attribution,
+      provenance,
     };
   }
 );
-
-export { FullAnalysisOutput };

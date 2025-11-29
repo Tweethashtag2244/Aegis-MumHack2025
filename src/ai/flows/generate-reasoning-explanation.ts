@@ -1,9 +1,5 @@
 'use server';
 
-/**
- * Reasoning Explanation Agent — synthesizes weighted consensus.
- */
-
 import { ai } from '@/ai/genkit';
 import {
   GenerateReasoningExplanationInputSchema,
@@ -23,35 +19,38 @@ const generateReasoningExplanationPrompt = ai.definePrompt({
   input: { schema: GenerateReasoningExplanationInputSchema },
   output: { schema: GenerateReasoningExplanationOutputSchema },
   model: 'googleai/gemini-2.5-flash',
+  config: { temperature: 0.4, topP: 0.9, maxOutputTokens: 1024 },
   prompt: `
-You are the Reasoning Explanation Agent for Aegis.
+You are the "Aegis" Digital Forensics AI. synthesize data from multiple detection agents into a clear verdict.
 
-Your task is to provide a clear, user-friendly explanation for the video's authenticity classification based on the provided analysis from multiple expert agents.
+### Input Data:
+1. **Perceptual Analysis (Visual Artifacts):**
+   - Score: {{perceptualScore}} / 1.0 (Higher is Real)
+   - Details: {{perceptualExplanation}}
+
+2. **Semantic Coherence (Audio/Visual Logic):**
+   - Score: {{semanticScore}} / 1.0 (Higher is Real)
+   - Details: {{semanticExplanation}}
+
+3. **Advanced Forensic Signals:**
+   {{#if additionalContext}}
+   - **Provenance:** Score {{additionalContext.provenance.provenanceScore}}/1.0. Encoder: {{additionalContext.provenance.encoder}}.
+   - **Model Attribution:** Detected "{{additionalContext.attribution.detectedModel}}" (Confidence: {{additionalContext.attribution.confidence}}).
+   - **Adversarial Robustness:** Score {{additionalContext.adversarial.robustnessScore}}/1.0. (High = Robust, Low = Fragile).
+   - **Collective Consensus:** Score {{additionalContext.consensus.score}}/1.0. Note: {{additionalContext.consensus.explanation}}.
+   {{/if}}
+
+### Final Verdict:
+- **Classification:** {{classification}}
+- **Authenticity Score:** {{finalScore}} / 1.0
 
 ### Instructions:
-1.  State the final classification provided (Likely Real, AI-Generated, or Uncertain).
-2.  Synthesize the key findings from the Perceptual and Semantic agents into a cohesive narrative.
-3.  Start with the most impactful finding. For example, if perceptual analysis found strong artifacts, lead with that. If the video was perceptually clean but semantically incoherent, explain that contrast.
-4.  Keep the reasoning concise (2-4 sentences), factual, and easy for a non-expert to understand. Do not simply repeat the agent explanations; interpret and summarize them.
+Write a **concise, 2-paragraph reasoning summary**.
+- **Paragraph 1:** Explain the classification. Mention the strongest evidence (e.g., "Specific artifacts from the Sora model were detected" or "Semantic lighting inconsistencies").
+- **Paragraph 2:** Comment on the metadata/provenance and consensus. Is the file header suspicious? Did online consensus verify it?
+- **Tone:** Professional, objective, and authoritative.
 
-### Inputs:
-- Classification: {{classification}} (based on a final score of {{finalScore}})
-- Perceptual Analysis: {{perceptualScore}}, "{{perceptualExplanation}}"
-- Semantic Analysis: {{semanticScore}}, "{{semanticExplanation}}"
-
-Generate the 'reasoningSummary' accordingly.
-`,
-  config: {
-    temperature: 0.3,
-    topP: 0.9,
-    maxOutputTokens: 1024,
-    safetySettings: [
-      {
-        category: 'HARM_CATEGORY_DANGEROUS_CONTENT',
-        threshold: 'BLOCK_ONLY_HIGH',
-      },
-    ],
-  },
+  `,
 });
 
 const generateReasoningExplanationFlow = ai.defineFlow(
@@ -60,26 +59,16 @@ const generateReasoningExplanationFlow = ai.defineFlow(
     inputSchema: GenerateReasoningExplanationInputSchema,
     outputSchema: GenerateReasoningExplanationOutputSchema,
   },
-  async input => {
+  async (input) => {
     try {
-      // Safely assign the result of the prompt call.
       const result = await generateReasoningExplanationPrompt(input);
-      
-      // Check if the result object is null/undefined OR if the structured 'output' property is missing.
-      if (!result || !result.output) {
-        throw new Error('LLM response was null or missing structured output after prompt execution.');
-      }
-      
-      // If successful, return the structured output.
+      if (!result || !result.output) throw new Error('LLM response missing.');
       return result.output;
     } catch (error) {
-      // Catch any error thrown by the Genkit runtime (API failure, timeout, etc.)
-      console.error('Error during LLM call for reasoning explanation:', error);
-      
-      // FIX: Instead of re-throwing, return a fallback object that meets the schema requirement.
+      console.error('LLM Error:', error);
       return {
-        reasoningSummary: `[System Failure] Could not generate a detailed summary due to an internal API or schema validation error. The final classification is ${input.classification}.`,
-      } as GenerateReasoningExplanationOutput;
+        reasoningSummary: `Analysis complete. Classification: ${input.classification}. (Detailed summary unavailable due to API timeout).`,
+      };
     }
   }
 );
