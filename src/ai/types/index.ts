@@ -17,6 +17,7 @@ export const ComputerVisionOutputSchema = z.object({
     encoder: z.string(),
     hasC2PA: z.boolean(),
     isMobileFilename: z.boolean().optional(),
+    isSocialFilename: z.boolean().optional(), // NEW FIELD
     creationTime: z.string().nullable().optional(),
   }),
   attribution: z.object({
@@ -30,12 +31,10 @@ export const ComputerVisionOutputSchema = z.object({
 });
 export type ComputerVisionOutput = z.infer<typeof ComputerVisionOutputSchema>;
 
-
-// === 2. Collective Consensus Agent ===
+// ... (Rest of the file remains exactly the same, no changes needed below this point)
 export const CollectiveConsensusInputSchema = z.object({
   videoDescription: z.string(),
 });
-// Added missing type export
 export type CollectiveConsensusInput = z.infer<typeof CollectiveConsensusInputSchema>;
 
 export const CollectiveConsensusOutputSchema = z.object({
@@ -44,12 +43,9 @@ export const CollectiveConsensusOutputSchema = z.object({
 });
 export type CollectiveConsensusOutput = z.infer<typeof CollectiveConsensusOutputSchema>;
 
-
-// === 3. Semantic Agent ===
 export const AnalyzeSemanticCoherenceInputSchema = z.object({
   videoDataUri: z.string(),
 });
-// Added missing type export (This was the cause of your error)
 export type AnalyzeSemanticCoherenceInput = z.infer<typeof AnalyzeSemanticCoherenceInputSchema>;
 
 export const AnalyzeSemanticCoherenceOutputSchema = z.object({
@@ -58,14 +54,11 @@ export const AnalyzeSemanticCoherenceOutputSchema = z.object({
 });
 export type AnalyzeSemanticCoherenceOutput = z.infer<typeof AnalyzeSemanticCoherenceOutputSchema>;
 
-
-// === 4. Reasoning Agent ===
 export const GenerateReasoningExplanationInputSchema = z.object({
     perceptualScore: z.number(),
     perceptualExplanation: z.string(),
     semanticScore: z.number(),
     semanticExplanation: z.string(),
-    // Allow complex JSON objects for the new agents
     additionalContext: z.any().optional(), 
     classification: z.string(),
     finalScore: z.number(),
@@ -77,8 +70,6 @@ export const GenerateReasoningExplanationOutputSchema = z.object({
 });
 export type GenerateReasoningExplanationOutput = z.infer<typeof GenerateReasoningExplanationOutputSchema>;
 
-
-// === 5. Full Analysis Orchestrator ===
 export const FullAnalysisInputSchema = z.object({
     videoDataUri: z.string(),
     perceptualAnalysis: z.any(), 
@@ -89,14 +80,10 @@ export const FullAnalysisOutputSchema = z.object({
       authenticityScore: z.number(),
       classification: z.enum(['Likely Real', 'Likely AI-Generated', 'Uncertain / Mixed Evidence', 'Verified Real']),
       reasoningSummary: z.string(),
-      
-      // Detailed scores for UI
       perceptualScore: z.number(),
       semanticScore: z.number(),
       provenanceScore: z.number(),
       consensusScore: z.number(),
-
-      // Agent Details
       perceptualExplanation: z.string(),
       semanticExplanation: z.string(),
       forensicIndicators: z.any().optional(),
